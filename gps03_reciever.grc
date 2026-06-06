@@ -1,0 +1,1316 @@
+options:
+  parameters:
+    author: GPS01
+    catch_exceptions: 'True'
+    category: '[GRC Hier Blocks]'
+    cmake_opt: ''
+    comment: "GPS L1 C/A Receiver — HackRF Educational Flow Graph\n\
+      Frequency : 1575.42 MHz  (L1 = 154 \xD7 10.23 MHz)\n\
+      Chip rate : 1.023 Mcps   (C/A Gold code)\n\
+      Sample rate: 4.092 MSPS  (4 samples/chip)\n\
+      Each block reflects one distinct mathematical operation."
+    copyright: ''
+    description: >-
+      Receives GPS L1 C/A signal via HackRF and decodes latitude/longitude.
+      Every DSP and navigation step is an individual block so the signal
+      processing mathematics is fully visible in the flow graph.
+    gen_cmake: 'On'
+    gen_linking: dynamic
+    hier_block_src_path: '.:'
+    id: gps03_reciever
+    max_nouts: '0'
+    output_language: python
+    placement: [0, 0]
+    qt_qss_theme: ''
+    realtime_scheduling: ''
+    run: 'True'
+    run_command: '{python} -u {filename}'
+    run_options: prompt
+    sizing_mode: fixed
+    thread_safe_setters: ''
+    title: "GPS03 \u2014 HackRF GPS L1 Receiver (Educational)"
+    window_size: [3400, 2000]
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 8]
+    rotation: 0
+    state: enabled
+
+# ═══════════════════════════════════════════════════════════════
+#  VARIABLES
+# ═══════════════════════════════════════════════════════════════
+
+blocks:
+
+- name: samp_rate
+  id: variable
+  parameters:
+    comment: "4 \xD7 1.023e6 = 4.092 MSPS — 4 samples per GPS C/A chip"
+    value: '4092000'
+  states:
+    coordinate: [200, 16]
+    rotation: 0
+    state: enabled
+
+- name: gps_l1_freq
+  id: variable
+  parameters:
+    comment: "L1 = 154 \xD7 f0, where f0 = 10.23 MHz fundamental"
+    value: '1575420000'
+  states:
+    coordinate: [360, 16]
+    rotation: 0
+    state: enabled
+
+- name: chip_rate
+  id: variable
+  parameters:
+    comment: 'C/A chipping rate = f0 / 10 = 1.023 Mcps'
+    value: '1023000'
+  states:
+    coordinate: [520, 16]
+    rotation: 0
+    state: enabled
+
+- name: code_len_samples
+  id: variable
+  parameters:
+    comment: '1023 chips × 4 samp/chip = 4092 samples per 1 ms epoch'
+    value: '4092'
+  states:
+    coordinate: [680, 16]
+    rotation: 0
+    state: enabled
+
+- name: sv_prn
+  id: variable_qtgui_chooser
+  parameters:
+    comment: 'Active GPS satellite PRN to track (1-32)'
+    label: 'Satellite PRN'
+    num_opts: '8'
+    option_labels: "['PRN 1','PRN 2','PRN 3','PRN 4','PRN 5','PRN 6','PRN 7','PRN 8']"
+    options: '[1,2,3,4,5,6,7,8]'
+    type: int
+    value: '1'
+    widget: combo_box
+  states:
+    coordinate: [840, 16]
+    rotation: 0
+    state: enabled
+
+- name: if_freq_hz
+  id: variable_qtgui_range
+  parameters:
+    comment: 'Manual IF frequency offset trim (Hz)'
+    label: 'IF Offset (Hz)'
+    min_len: '200'
+    orient: QtCore.Qt.Horizontal
+    rangeType: float
+    start: '-20000'
+    stop: '20000'
+    step: '50'
+    value: '0'
+    widget: counter_slider
+  states:
+    coordinate: [1040, 16]
+    rotation: 0
+    state: enabled
+
+- name: hackrf_lna_db
+  id: variable_qtgui_range
+  parameters:
+    comment: 'HackRF LNA gain 0-40 dB in 8 dB steps'
+    label: 'LNA Gain (dB)'
+    min_len: '200'
+    orient: QtCore.Qt.Horizontal
+    rangeType: int
+    start: '0'
+    stop: '40'
+    step: '8'
+    value: '16'
+    widget: counter_slider
+  states:
+    coordinate: [1240, 16]
+    rotation: 0
+    state: enabled
+
+- name: hackrf_vga_db
+  id: variable_qtgui_range
+  parameters:
+    comment: 'HackRF VGA (baseband) gain 0-62 dB in 2 dB steps'
+    label: 'VGA Gain (dB)'
+    min_len: '200'
+    orient: QtCore.Qt.Horizontal
+    rangeType: int
+    start: '0'
+    stop: '62'
+    step: '2'
+    value: '16'
+    widget: counter_slider
+  states:
+    coordinate: [1440, 16]
+    rotation: 0
+    state: enabled
+
+- name: hackrf_amp_enable
+  id: variable_qtgui_check_box
+  parameters:
+    comment: 'HackRF RF amplifier +14 dB (use with care at GPS frequencies)'
+    label: 'RF Amp (+14 dB)'
+    type: int
+    value: '0'
+  states:
+    coordinate: [1640, 16]
+    rotation: 0
+    state: enabled
+
+# ═══════════════════════════════════════════════════════════════
+#  STEP 1 — RF FRONT END  (HackRF Source)
+# ═══════════════════════════════════════════════════════════════
+
+- name: rtlsdr_source_0
+  id: osmosdr_source
+  parameters:
+    comment: "STEP 1 \u2014 RF FRONT END\n\
+      Hardware: HackRF One\n\
+      Center freq: 1575.42 MHz (GPS L1)\n\
+      ADC: 8-bit I and Q \u2192 complex64 output\n\
+      LNA gain: 0-40 dB (8 dB steps)\n\
+      VGA gain: 0-62 dB (2 dB steps)\n\
+      RF amp: 0 or +14 dB\n\
+      GPS signal \u2248 \u221220 dB below thermal noise\n\
+      kTB = 1.38e-23 \xD7 290 \xD7 4.09e6 \u2248 \u2212103 dBm  (noise floor)"
+    affinity: ''
+    alias: ''
+    args: '''hackrf=0,bias=1'''
+    bandwidth: '0'
+    bb_gain: hackrf_vga_db
+    freq: gps_l1_freq
+    freq_corr: '0'
+    gain: hackrf_amp_enable
+    gain_mode: 'False'
+    if_gain: hackrf_lna_db
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    num_motherboards: '1'
+    sample_rate: samp_rate
+    type: fc32
+  states:
+    coordinate: [24, 288]
+    rotation: 0
+    state: enabled
+
+# ─── Visualise raw L1 spectrum ───────────────────────────────────────────────
+
+- name: qtgui_freq_sink_rf
+  id: qtgui_freq_sink_x
+  parameters:
+    affinity: ''
+    alias: ''
+    alpha1: '1.0'
+    autoscale: 'False'
+    average: '0.05'
+    axislabels: 'True'
+    bw: samp_rate
+    comment: "VISUALISATION — Raw RF spectrum at L1\n\
+      GPS L1 C/A occupies \xB12.046 MHz around 1575.42 MHz\n\
+      (first null-to-null BW = 2 \xD7 chip_rate)"
+    fc: gps_l1_freq
+    fftsize: '4096'
+    freqhalf: 'True'
+    grid: 'True'
+    gui_hint: 'tabs@0:0,0,1,2'
+    label: RF Spectrum (L1)
+    label1: GPS L1
+    legend: 'True'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    name: '"STEP 1: Raw RF @ 1575.42 MHz"'
+    nconnections: '1'
+    norm_window: 'False'
+    showports: 'False'
+    tr_chan: '0'
+    tr_level: '0.0'
+    tr_mode: qtgui.TRIG_MODE_FREE
+    tr_tag: '""'
+    type: complex
+    units: dB
+    update_time: '0.10'
+    width1: '1'
+    wintype: window.WIN_BLACKMAN_hARRIS
+    ymax: '10'
+    ymin: '-140'
+  states:
+    coordinate: [24, 488]
+    rotation: 0
+    state: enabled
+
+# ═══════════════════════════════════════════════════════════════
+#  STEP 2 — BANDPASS FILTER  (Anti-alias + GPS BW selection)
+# ═══════════════════════════════════════════════════════════════
+
+- name: low_pass_filter_0
+  id: low_pass_filter
+  parameters:
+    affinity: ''
+    alias: ''
+    beta: '6.76'
+    comment: "STEP 2 \u2014 BANDLIMIT FILTER\n\
+      Math: H(f) = rect(f / 2\xB7BW)   [ideal]\n\
+      FIR approximation with Kaiser window (\u03B2=6.76)\n\
+      h(n) = 2\xB7BW\xB7sinc(2\xB7BW\xB7n) \xD7 w_Kaiser(n)\n\
+      Convolution: y(t) = x(t) \u2217 h(t)\n\
+      Cutoff = 2.046 MHz (= 2\xD7chip_rate) — preserves C/A main lobe\n\
+      Transition BW = 500 kHz — removes adjacent channels\n\
+      Removes: interference, adjacent signals, and out-of-band noise"
+    decim: '1'
+    gain: '1'
+    interp: '1'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    cutoff_freq: '2046000'
+    samp_rate: samp_rate
+    type: fir_filter_ccf
+    width: '500000'
+    win: window.WIN_KAISER
+  states:
+    coordinate: [288, 288]
+    rotation: 0
+    state: enabled
+
+- name: qtgui_freq_sink_filtered
+  id: qtgui_freq_sink_x
+  parameters:
+    affinity: ''
+    alias: ''
+    alpha1: '1.0'
+    autoscale: 'False'
+    average: '0.05'
+    axislabels: 'True'
+    bw: samp_rate
+    comment: "VISUALISATION — Filtered GPS band\n\
+      After FIR: only C/A main lobe (\xB12 MHz) remains"
+    fc: '0'
+    fftsize: '4096'
+    freqhalf: 'True'
+    grid: 'True'
+    gui_hint: 'tabs@0:1,0,1,2'
+    label: Filtered Spectrum
+    label1: Filtered GPS L1
+    legend: 'True'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    name: '"STEP 2: Bandlimited (FIR, BW=2.046 MHz)"'
+    nconnections: '1'
+    norm_window: 'False'
+    showports: 'False'
+    tr_chan: '0'
+    tr_level: '0.0'
+    tr_mode: qtgui.TRIG_MODE_FREE
+    tr_tag: '""'
+    type: complex
+    units: dB
+    update_time: '0.10'
+    width1: '1'
+    wintype: window.WIN_BLACKMAN_hARRIS
+    ymax: '10'
+    ymin: '-140'
+  states:
+    coordinate: [288, 488]
+    rotation: 0
+    state: enabled
+
+# ═══════════════════════════════════════════════════════════════
+#  STEP 3 — AUTOMATIC GAIN CONTROL
+# ═══════════════════════════════════════════════════════════════
+
+- name: analog_agc2_cc_0
+  id: epy_block
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: "STEP 3 \u2014 AUTOMATIC GAIN CONTROL (AGC)\n\
+      Math: y(n) = x(n) \xD7 g(n)\n\
+      g(n+1) = g(n) + rate\xB7(ref \u2212 |y(n)|\xB2)\xB7g(n)\n\
+      Normalises amplitude so correlators see unit-power signal"
+    _io_cache: '(''AGC'', ''blk'', [(''rate'', ''0.001''), (''reference'', ''1.0''),
+      (''gain'', ''1.0''), (''max_gain'', ''65536.0'')], [(''0'', ''complex'', 1)],
+      [(''0'', ''complex'', 1)], ''Automatic Gain Control for complex stream.'', {})'
+    _source_code: "import numpy as np\nfrom gnuradio import gr\n\n\nclass blk(gr.sync_block):\n    \"\"\"Automatic Gain Control.\"\"\"\n\n    def __init__(self, rate=0.001, reference=1.0, gain=1.0, max_gain=65536.0):\n        gr.sync_block.__init__(self, name='AGC', in_sig=[np.complex64], out_sig=[np.complex64])\n        self.rate = rate\n        self.reference = reference\n        self.gain = float(gain)\n        self.max_gain = float(max_gain)\n\n    def work(self, input_items, output_items):\n        inp = input_items[0]\n        out = output_items[0]\n        g = self.gain\n        for i in range(len(inp)):\n            y = inp[i] * g\n            out[i] = y\n            g += self.rate * (self.reference - abs(y) ** 2) * g\n            if g < 0.0:\n                g = 0.0\n            if g > self.max_gain:\n                g = self.max_gain\n        self.gain = g\n        return len(output_items[0])\n"
+    gain: '1.0'
+    max_gain: '65536.0'
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    rate: '1e-3'
+    reference: '1.0'
+  states:
+    coordinate: [576, 288]
+    rotation: 0
+    state: enabled
+
+- name: qtgui_time_sink_agc
+  id: qtgui_time_sink_x
+  parameters:
+    affinity: ''
+    alias: ''
+    alpha1: '1.0'
+    autoscale: 'True'
+    axislabels: 'True'
+    comment: "VISUALISATION \u2014 AGC output I/Q samples\n\
+      Should show noise-like waveform at unit amplitude"
+    grid: 'True'
+    gui_hint: 'tabs@1:0,0,1,2'
+    label1: I (Real)
+    label2: Q (Imag)
+    legend: 'True'
+    marker1: '-1'
+    marker2: '-1'
+    name: '"STEP 3: AGC-Normalised Signal"'
+    nconnections: '1'
+    size: '4092'
+    srate: samp_rate
+    stemplot: 'False'
+    style1: '1'
+    style2: '1'
+    tr_chan: '0'
+    tr_delay: '0.0'
+    tr_level: '0.5'
+    tr_mode: qtgui.TRIG_MODE_FREE
+    tr_slope: qtgui.TRIG_SLOPE_POS
+    tr_tag: '""'
+    type: complex
+    update_time: '0.10'
+    width1: '1'
+    width2: '1'
+    ylabel: Amplitude
+    ymax: '2'
+    ymin: '-2'
+    yunit: '""'
+  states:
+    coordinate: [576, 488]
+    rotation: 0
+    state: enabled
+
+# ═══════════════════════════════════════════════════════════════
+#  STEP 4 — PRN CODE GENERATOR  (Gold Codes)
+# ═══════════════════════════════════════════════════════════════
+
+- name: epy_prn_generator
+  id: epy_block
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: "STEP 4 \u2014 PRN CODE GENERATOR (Gold Codes)\n\
+      Two 10-stage LFSRs combined via XOR:\n\
+        G1(x) = x\xB9\xB0 + x\xB3 + 1           (feedback: taps 3, 10)\n\
+        G2(x) = x\xB9\xB0+x\u2079+x\u2078+x\u2076+x\xB3+x\xB2+1  (feedback: 2,3,6,8,9,10)\n\
+      C/A(n) = G1(n) \u2295 G2(n + phase_offset[sv])  mod 2\n\
+      Maps {0,1} \u2192 {+1,\u22121}, upsampled to 4 samp/chip\n\
+      Period = 1023 chips = 1 ms epoch"
+    _io_cache: '(''PRN Code Generator'', ''blk'', [(''sv_prn'', ''1''), (''samp_rate'',
+      ''4092000''), (''chip_rate'', ''1023000'')], [], [(''0'', ''complex'', 1)],
+      ''GPS C/A Gold Code generator for a given satellite PRN.\n\nMath:\n  Two
+      10-stage LFSRs with polynomial feedback.\n  G1 poly: x^10 + x^3 + 1\n  G2
+      poly: x^10+x^9+x^8+x^6+x^3+x^2+1\n  CA(n) = G1(n) XOR G2(n + phase[sv])\n  Output:
+      {+1,-1} upsampled to samp_rate/chip_rate samples per chip.'', {})'
+    _source_code: "import numpy as np\nfrom gnuradio import gr\n\n\nclass blk(gr.sync_block):\n\
+      \    \"\"\"GPS C/A Gold Code Generator\n\n    Two 10-stage Linear Feedback\
+      \ Shift Registers (LFSRs) whose XOR output\n    produces a unique 1023-chip\
+      \ sequence for each GPS satellite PRN.\n\n    Math:\n        G1 polynomial:\
+      \  x^10 + x^3 + 1          (feedback taps: 3, 10)\n        G2 polynomial:\
+      \  x^10+x^9+x^8+x^6+x^3+x^2+1 (feedback taps: 2,3,6,8,9,10)\n        C/A(n)\
+      \ = G1(n) XOR G2((n + phase_offset[sv]) mod 1023)\n\n    Output: complex64\
+      \ stream of +1.0+0j / -1.0+0j chips, upsampled to\n            samp_rate /\
+      \ chip_rate samples per chip (4 samp/chip @ 4.092 MSPS).\n    \"\"\"\n\n \
+      \   # G2 phase assignments (chip delay per SV PRN 1..32)\n    _G2_PHASE =\
+      \ [\n        5,  6,  7,  8, 17, 18, 139, 140, 141, 251,\n        252, 254,\
+      \ 255, 256, 257, 258, 469, 470, 471, 472,\n        473, 474, 509, 512, 513,\
+      \ 514, 515, 516, 859, 860,\n        861, 862\n    ]\n\n    def __init__(self,\
+      \ sv_prn=1, samp_rate=4092000, chip_rate=1023000):\n        gr.sync_block.__init__(\n\
+      \            self,\n            name='PRN Code Generator',\n            in_sig=None,\n\
+      \            out_sig=[np.complex64]\n        )\n        self.sps = max(1, int(round(samp_rate\
+      \ / chip_rate)))  # samples per chip\n        self._build_code(sv_prn)\n\n\
+      \    def _build_code(self, sv):\n        \"\"\"Generate full 1023-chip C/A\
+      \ code and upsample.\"\"\"\n        phase = self._G2_PHASE[(sv - 1) % 32]\n\
+      \n        # Initialise both LFSRs to all-ones\n        g1 = [1] * 10\n    \
+      \    g2 = [1] * 10\n\n        chips = np.empty(1023, dtype=np.float32)\n  \
+      \      for i in range(1023):\n            g1_out = g1[9]                 \
+      \     # tap 10 (index 9)\n            g2_out = g2[(phase - 1) % 10]      \
+      \ # delayed tap\n            chips[i] = float(g1_out ^ g2_out)  # 0 or 1\n\
+      \n            # Advance G1: feedback = tap3 XOR tap10\n            g1_fb =\
+      \ g1[2] ^ g1[9]\n            g1 = [g1_fb] + g1[:-1]\n\n            # Advance\
+      \ G2: feedback = tap2^tap3^tap6^tap8^tap9^tap10\n            g2_fb = g2[1]^\
+      g2[2]^g2[5]^g2[7]^g2[8]^g2[9]\n            g2 = [g2_fb] + g2[:-1]\n\n   \
+      \     # {0,1} -> {+1,-1}  then upsample to samp_rate\n        bipolar = (1.0\
+      \ - 2.0 * chips).astype(np.float32)\n        upsampled = np.repeat(bipolar,\
+      \ self.sps)\n        self._code = (upsampled + 0j).astype(np.complex64)\n \
+      \       self._len = len(self._code)   # = 4092 at 4.092 MSPS\n        self._idx\
+      \ = 0\n\n    def work(self, input_items, output_items):\n        n = len(output_items[0])\n\
+      \        out = output_items[0]\n        # Wrap-around indexing into the 1 ms\
+      \ code epoch\n        for i in range(n):\n            out[i] = self._code[self._idx\
+      \ % self._len]\n            self._idx += 1\n        return n\n"
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    sv_prn: sv_prn
+    samp_rate: samp_rate
+    chip_rate: chip_rate
+  states:
+    coordinate: [576, 600]
+    rotation: 0
+    state: enabled
+
+# ─── Visualise the PRN code ───────────────────────────────────────────────────
+
+- name: qtgui_time_sink_prn
+  id: qtgui_time_sink_x
+  parameters:
+    affinity: ''
+    alias: ''
+    alpha1: '1.0'
+    autoscale: 'False'
+    axislabels: 'True'
+    comment: "VISUALISATION \u2014 Local PRN replica (1 epoch = 1 ms)\n\
+      Square wave ±1, chip width = 4 samples"
+    grid: 'True'
+    gui_hint: 'tabs@1:1,0,1,2'
+    label1: PRN Chips
+    legend: 'True'
+    marker1: '-1'
+    name: '"STEP 4: PRN Gold Code (1 ms epoch)"'
+    nconnections: '1'
+    size: '4092'
+    srate: samp_rate
+    stemplot: 'False'
+    style1: '1'
+    tr_chan: '0'
+    tr_delay: '0.0'
+    tr_level: '0.0'
+    tr_mode: qtgui.TRIG_MODE_FREE
+    tr_slope: qtgui.TRIG_SLOPE_POS
+    tr_tag: '""'
+    type: complex
+    update_time: '0.10'
+    width1: '1'
+    ylabel: Amplitude
+    ymax: '1.5'
+    ymin: '-1.5'
+    yunit: '""'
+  states:
+    coordinate: [576, 740]
+    rotation: 0
+    state: enabled
+
+# ═══════════════════════════════════════════════════════════════
+#  STEP 5 — CODE CORRELATION  (Despread / Wipe-off C/A code)
+# ═══════════════════════════════════════════════════════════════
+
+- name: blocks_multiply_cc_0
+  id: epy_block
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: "STEP 5 \u2014 CODE WIPE-OFF (Correlation)\n\
+      Math: z(n) = x(n) \xD7 c(n\u2212\u03C4)    [complex multiply]\n\
+      where x(n) = received signal (after AGC)\n\
+            c(n) = local PRN replica (±1, from Step 4)\n\
+      When code phase \u03C4 matches received code: signal despreads\n\
+      to a narrowband 50 bps BPSK nav message signal.\n\
+      When \u03C4 does not match: output remains wideband noise.\n\
+      BPSK despreading gain = 10\xB7log10(1023) \u2248 30 dB"
+    _io_cache: '(''Multiply'', ''blk'', [], [(''0'', ''complex'', 1), (''1'', ''complex'',
+      1)], [(''0'', ''complex'', 1)], ''Element-wise complex multiply of two streams.'',
+      {})'
+    _source_code: "import numpy as np\nfrom gnuradio import gr\n\n\nclass blk(gr.sync_block):\n    \"\"\"Element-wise complex multiply.\"\"\"\n\n    def __init__(self):\n        gr.sync_block.__init__(self, name='Multiply', in_sig=[np.complex64, np.complex64], out_sig=[np.complex64])\n\n    def work(self, input_items, output_items):\n        output_items[0][:] = input_items[0] * input_items[1]\n        return len(output_items[0])\n"
+    maxoutbuf: '0'
+    minoutbuf: '0'
+  states:
+    coordinate: [860, 300]
+    rotation: 0
+    state: enabled
+
+# ═══════════════════════════════════════════════════════════════
+#  STEP 6 — COHERENT INTEGRATION  (Integrate & Dump over 1 ms)
+# ═══════════════════════════════════════════════════════════════
+
+- name: blocks_integrate_cc_0
+  id: epy_block
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: "STEP 6 \u2014 COHERENT INTEGRATION (Integrate & Dump)\n\
+      Math: I(k) = \u03A3[n=0..N-1] z(n + k\xB7N)    where N = code_len_samples\n\
+      Equivalent to a matched filter for the PRN code:\n\
+        I = \u03A3 Re[z(n)]   (in-phase  component)\n\
+        Q = \u03A3 Im[z(n)]   (quadrature component)\n\
+      Integration length N = 4092 samples = 1 ms epoch\n\
+      SNR improvement = 10\xB7log10(N) \u2248 36 dB\n\
+      Output rate = 1000 correlation values/second"
+    _io_cache: '(''Integrate & Dump'', ''blk'', [(''decim'', ''4092'')], [(''0'', ''complex'', 1)], [(''0'', ''complex'', 1)], ''Epoch accumulator: holds PRN-epoch sum at full rate.'', {})'
+    _source_code: "import numpy as np\nfrom gnuradio import gr\n\n\nclass blk(gr.sync_block):\n    \"\"\"Coherent Integrate & Dump (epoch accumulator, full-rate output).\"\"\"\n\n    def __init__(self, decim=4092):\n        gr.sync_block.__init__(self, name='Integrate & Dump', in_sig=[np.complex64], out_sig=[np.complex64])\n        self.decim = int(decim)\n        self._accum = np.complex64(0)\n        self._last = np.complex64(0)\n        self._count = 0\n\n    def work(self, input_items, output_items):\n        inp = input_items[0]\n        out = output_items[0]\n        n = len(inp)\n        for i in range(n):\n            self._accum += inp[i]\n            self._count += 1\n            if self._count >= self.decim:\n                self._last = self._accum\n                self._accum = np.complex64(0)\n                self._count = 0\n            out[i] = self._last\n        return n\n"
+    decim: code_len_samples
+    maxoutbuf: '0'
+    minoutbuf: '0'
+  states:
+    coordinate: [1060, 300]
+    rotation: 0
+    state: enabled
+
+# ═══════════════════════════════════════════════════════════════
+#  STEP 7 — ACQUISITION ENGINE  (FFT parallel frequency search)
+# ═══════════════════════════════════════════════════════════════
+
+- name: epy_acquisition
+  id: epy_block
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: "STEP 7 \u2014 SIGNAL ACQUISITION (FFT Parallel Search)\n\
+      Searches code phase (0..1022 chips) AND Doppler (±10 kHz) simultaneously.\n\
+      Math:\n\
+        For each Doppler hypothesis f_D:\n\
+          x_d(n) = x(n) \xD7 e^{-j2\u03C0 f_D n / f_s}       [carrier wipe-off]\n\
+          R(\u03C4, f_D) = IFFT{ FFT(x_d) \xD7 conj(FFT(c)) } [circular correlation]\n\
+          |R(\u03C4, f_D)|\xB2 = cross-correlation power surface\n\
+        Peak detection: (\u03C4*, f_D*) = argmax |R(\u03C4, f_D)|\xB2\n\
+        Threshold: peak / mean > 2.5  (declared acquired)\n\
+      Output: code_phase (samples), doppler_freq (Hz), C/N0 estimate"
+    _io_cache: '(''Acquisition Engine'', ''blk'', [(''samp_rate'', ''4092000''),
+      (''chip_rate'', ''1023000''), (''sv_prn'', ''1'')], [(''0'', ''complex'', 1)],
+      [(''0'', ''float'', 1)], ''FFT-based parallel code/frequency acquisition.'',
+      {})'
+    _source_code: "import numpy as np\nfrom gnuradio import gr\n\n\nclass blk(gr.sync_block):\n\
+      \    \"\"\"GPS Signal Acquisition Engine\n\n    Uses FFT-based circular correlation\
+      \ to search simultaneously over:\n      - Code phase : 0 .. 1022 chips (= 4092\
+      \ samples at 4 samp/chip)\n      - Doppler     : -10 kHz .. +10 kHz in 500\
+      \ Hz steps\n\n    Math (per Doppler bin f_D):\n        x_d(n)      = x(n)\
+      \ * exp(-j*2*pi*f_D*n/fs)          carrier wipe-off\n        R(tau, f_D) =\
+      \ IFFT{ FFT(x_d) * conj(FFT(c)) }    circular cross-correlation\n        Peak\
+      \ = argmax |R(tau, f_D)|^2                        best code/freq match\n  \
+      \      CN0_est = 10*log10(peak_power / noise_floor / T_coh)   C/N0 estimate\n\
+      \n    Outputs scalar float stream: [code_phase_samp, doppler_hz, cn0_db]\n\
+      \    packed as a 3-element repeating sequence.\n    \"\"\"\n\n    def __init__(self,\
+      \ samp_rate=4092000, chip_rate=1023000, sv_prn=1):\n        gr.sync_block.__init__(\n\
+      \            self,\n            name='Acquisition Engine',\n            in_sig=[np.complex64],\n\
+      \            out_sig=[np.float32]\n        )\n        self.fs = samp_rate\n\
+      \        self.N  = int(round(samp_rate / chip_rate)) * 1023  # 4092 samples\n\
+      \        self.doppler_range = np.arange(-10000, 10001, 500, dtype=np.float32)\n\
+      \        self._prn_fft = np.conj(np.fft.fft(self._ca_code(sv_prn, samp_rate,\
+      \ chip_rate)))\n        self.set_output_multiple(3)\n\n    def _ca_code(self,\
+      \ sv, fs, fc):\n        g2p = [5,6,7,8,17,18,139,140,141,251,252,254,255,256,\n\
+      \               257,258,469,470,471,472,473,474,509,512,513,514,\n         \
+      \      515,516,859,860,861,862]\n        phase = g2p[(sv-1)%32]\n        g1\
+      \ = g2 = [1]*10\n        chips = np.empty(1023, dtype=np.float32)\n       \
+      \ for i in range(1023):\n            chips[i] = float(g1[9] ^ g2[(phase-1)%10])\n\
+      \            g1_fb = g1[2]^g1[9]; g1 = [g1_fb]+g1[:-1]\n            g2_fb\
+      \ = g2[1]^g2[2]^g2[5]^g2[7]^g2[8]^g2[9]; g2 = [g2_fb]+g2[:-1]\n        return\
+      \ np.repeat(1.0-2.0*chips, int(round(fs/fc))).astype(np.complex64)\n\n    def\
+      \ work(self, input_items, output_items):\n        x = input_items[0]\n     \
+      \   if len(x) < self.N:\n            return 0\n        epoch = x[:self.N]\n\
+      \        n = np.arange(self.N, dtype=np.float64)\n        best_pow, best_tau,\
+      \ best_fd = 0.0, 0, 0.0\n        for fd in self.doppler_range:\n          \
+      \  # Carrier wipe-off for this Doppler hypothesis\n            wipeoff = epoch\
+      \ * np.exp(-1j * 2.0 * np.pi * fd * n / self.fs).astype(np.complex64)\n  \
+      \          corr = np.abs(np.fft.ifft(np.fft.fft(wipeoff) * self._prn_fft))**2\n\
+      \            pk = corr.max()\n            if pk > best_pow:\n              \
+      \  best_pow = pk\n                best_tau = int(corr.argmax())\n          \
+      \      best_fd  = float(fd)\n        noise = (best_pow - best_pow/len(epoch))\
+      \ / len(epoch) + 1e-30\n        cn0 = float(10.0 * np.log10(best_pow / noise\
+      \ / 0.001))\n        out = output_items[0]\n        out[0] = float(best_tau)\n\
+      \        out[1] = best_fd\n        out[2] = cn0\n        return 3\n"
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    samp_rate: samp_rate
+    chip_rate: chip_rate
+    sv_prn: sv_prn
+  states:
+    coordinate: [860, 500]
+    rotation: 0
+    state: enabled
+
+# ═══════════════════════════════════════════════════════════════
+#  STEP 8 — CARRIER TRACKING  (Costas PLL)
+# ═══════════════════════════════════════════════════════════════
+
+- name: epy_costas_pll
+  id: epy_block
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: "STEP 8 \u2014 CARRIER TRACKING (Costas PLL)\n\
+      Removes residual carrier and Doppler shift after acquisition.\n\
+      Math:\n\
+        NCO: \u03C6(n+1) = \u03C6(n) + 2\u03C0\xB7f_nco/f_s     [phase accumulator]\n\
+        Mix: y(n) = x(n) \xD7 e^{-j\u03C6(n)}              [carrier wipe-off]\n\
+        Phase discriminator (Costas): e(n) = Im[y(n)] \xD7 Re[y(n)]\n\
+          = sign(I) \xD7 Q  for BPSK\n\
+          (insensitive to data bit sign — Costas loop property)\n\
+        Loop filter (2nd order):\n\
+          v(n) = K1\xB7e(n) + K2\xB7\u03A3e(k)    [proportional + integral]\n\
+        f_nco(n+1) = f_nco(n) + v(n)          [NCO update]\n\
+      Bandwidth BL \u2248 18 Hz (typical GPS PLL)"
+    _io_cache: '(''Costas PLL (Carrier Tracking)'', ''blk'', [(''fs'', ''4092000''),
+      (''bw_hz'', ''18.0'')], [(''0'', ''complex'', 1)], [(''0'', ''complex'', 1)],
+      ''Second-order Costas PLL for GPS carrier phase tracking.'', {})'
+    _source_code: "import numpy as np\nfrom gnuradio import gr\n\n\nclass blk(gr.sync_block):\n\
+      \    \"\"\"Second-order Costas PLL — GPS Carrier Tracking\n\n    Tracks the\
+      \ residual carrier and Doppler after acquisition.\n    Uses an I/Q Costas phase\
+      \ discriminator that is insensitive to\n    the ±180-degree data bit transitions\
+      \ (BPSK on 50 bps nav message).\n\n    Loop equations (2nd-order PLL):\n  \
+      \      e(n)   = Im(y) * Re(y)   / (|y|^2 + eps)   [normalised Costas error]\n\
+      \        v(n)   = K1*e(n) + K2*integral(e)          [loop filter]\n       \
+      \ phi(n) = phi(n-1) + 2*pi*v(n)/fs                [phase update]\n       \
+      \ y(n)   = x(n) * exp(-j*phi(n))                  [wipe-off]\n    \"\"\"\n\n\
+      \    def __init__(self, fs=4092000, bw_hz=18.0):\n        gr.sync_block.__init__(\n\
+      \            self,\n            name='Costas PLL (Carrier Tracking)',\n     \
+      \       in_sig=[np.complex64],\n            out_sig=[np.complex64]\n       \
+      \ )\n        # 2nd-order loop gains from natural frequency\n        omega_n\
+      \ = 2.0 * np.pi * bw_hz\n        zeta   = 0.707          # critically damped\n\
+      \        T      = 1.0 / fs\n        self.K1 = 2.0 * zeta * omega_n * T   \
+      \  # proportional gain\n        self.K2 = omega_n**2 * T**2             # integral\
+      \ gain\n        self._phi     = 0.0\n        self._int_err = 0.0\n\n    def\
+      \ work(self, input_items, output_items):\n        x   = input_items[0]\n  \
+      \      out = output_items[0]\n        n   = len(x)\n        phi     = self._phi\n\
+      \        int_err = self._int_err\n        K1, K2  = self.K1, self.K2\n    \
+      \    tw_pi_over_fs = 2.0 * np.pi  # pre-factor; phase update is v(n)\n    \
+      \    for i in range(n):\n            # Wipe off current NCO phase\n        \
+      \    y = x[i] * np.exp(-1j * phi)\n            # Costas discriminator: e =\
+      \ Im(y)*Re(y) / (|y|^2 + 1e-10)\n            I, Q = float(y.real), float(y.imag)\n\
+      \            mag2 = I*I + Q*Q + 1e-10\n            e = (I * Q) / mag2\n  \
+      \          # Loop filter (proportional + integral)\n            int_err += K2\
+      \ * e\n            v = K1 * e + int_err\n            # Phase accumulator\n\
+      \            phi += v\n            out[i] = np.complex64(y)\n        self._phi\
+      \     = phi\n        self._int_err = int_err\n        return n\n"
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    fs: samp_rate
+    bw_hz: '18.0'
+  states:
+    coordinate: [1260, 288]
+    rotation: 0
+    state: enabled
+
+# ═══════════════════════════════════════════════════════════════
+#  STEP 9 — CODE TRACKING  (Delay-Locked Loop, DLL)
+# ═══════════════════════════════════════════════════════════════
+
+- name: epy_dll
+  id: epy_block
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: "STEP 9 \u2014 CODE TRACKING (Delay-Locked Loop, DLL)\n\
+      Keeps the local PRN replica aligned with the received code.\n\
+      Uses an early-minus-late (EML) envelope discriminator.\n\
+      Math:\n\
+        Early  replica: c_E(n) = c(n + \u0394/2)   [\u0394 = 1 chip early]\n\
+        Prompt replica: c_P(n) = c(n)            [on-time]\n\
+        Late   replica: c_L(n) = c(n \u2212 \u0394/2)   [\u0394 = 1 chip late]\n\
+        Correlate each against x(n) over 1 ms:\n\
+          E = \u03A3 x(n)\xB7c_E(n),  L = \u03A3 x(n)\xB7c_L(n)\n\
+        EML discriminator: \u03B5(\u03C4) = (|E|\xB2 \u2212 |L|\xB2) / (|E|\xB2 + |L|\xB2)\n\
+        Code phase update: \u03C4(k+1) = \u03C4(k) + K_dll \xB7 \u03B5(\u03C4)\n\
+      Bandwidth BL \u2248 1 Hz (narrow — thermal noise vs. dynamics)"
+    _io_cache: '(''DLL Code Tracking'', ''blk'', [(''fs'', ''4092000''), (''chip_rate'',
+      ''1023000''), (''sv_prn'', ''1'')], [(''0'', ''complex'', 1)], [(''0'', ''complex'',
+      1), (''1'', ''float'', 1)], ''Early-minus-late DLL for GPS C/A code phase tracking.'',
+      {})'
+    _source_code: "import numpy as np\nfrom gnuradio import gr\n\n\nclass blk(gr.sync_block):\n\
+      \    \"\"\"Early-Minus-Late (EML) Delay-Locked Loop\n\n    Tracks the C/A code\
+      \ phase to maintain correlation peak alignment.\n\n    Math:\n        Early\
+      \ / Late correlators at ±0.5 chip spacing:\n            R_E(tau) = sum( x(n)\
+      \ * c(n - tau + T_c/2) )   over 1 ms\n            R_L(tau) = sum( x(n) * c(n\
+      \ - tau - T_c/2) )   over 1 ms\n\n        EML normalised discriminator:\n \
+      \           eps(tau) = (|R_E|^2 - |R_L|^2) / (|R_E|^2 + |R_L|^2)\n\n     \
+      \   First-order loop update:\n            tau(k+1) = tau(k) + K_dll * eps(tau_k)\n\
+      \n        K_dll chosen for BL ~ 1 Hz.\n    Output port 0: complex (prompt correlator\
+      \ I+jQ for nav bits)\n    Output port 1: float  (code phase in chips for pseudorange)\n\
+      \    \"\"\"\n\n    _G2_PHASE = [\n        5,6,7,8,17,18,139,140,141,251,252,254,255,256,\n\
+      \        257,258,469,470,471,472,473,474,509,512,513,514,\n        515,516,859,860,861,862\n\
+      \    ]\n\n    def __init__(self, fs=4092000, chip_rate=1023000, sv_prn=1):\n\
+      \        gr.sync_block.__init__(\n            self,\n            name='DLL\
+      \ Code Tracking',\n            in_sig=[np.complex64],\n            out_sig=[np.complex64,\
+      \ np.float32]\n        )\n        self.sps  = int(round(fs / chip_rate))  #\
+      \ 4 samples/chip\n        self.N    = self.sps * 1023              # samples\
+      \ per epoch\n        self.K    = 0.001                        # DLL gain\n\
+      \        self.tau  = 0.0                          # code phase (chips)\n  \
+      \      self._code = self._gen_code(sv_prn, fs, chip_rate)\n        self.set_output_multiple(3)\n\
+      \        self._buf = np.zeros(0, dtype=np.complex64)\n\n    def _gen_code(self,\
+      \ sv, fs, fc):\n        ph = self._G2_PHASE[(sv-1)%32]\n        g1 = g2 =\
+      \ [1]*10\n        chips = np.empty(1023, dtype=np.float32)\n        for i in\
+      \ range(1023):\n            chips[i] = float(g1[9]^g2[(ph-1)%10])\n       \
+      \     g1=[g1[2]^g1[9]]+g1[:-1]; g2=[g2[1]^g2[2]^g2[5]^g2[7]^g2[8]^g2[9]]+g2[:-1]\n\
+      \        sps = int(round(fs / fc))\n        return np.tile(np.repeat(1.0-2.0*chips, sps), 3).astype(np.float32)  # 3 periods for\
+      \ wrapping\n\n    def work(self, input_items, output_items):\n        self._buf\
+      \ = np.concatenate([self._buf, input_items[0]])\n        if len(self._buf)\
+      \ < self.N:\n            return len(input_items[0])\n        epoch = self._buf[:self.N]\n\
+      \        self._buf = self._buf[self.N:]\n        sps = self.sps\n        tau_samp\
+      \ = int(round(self.tau * sps)) % self.N\n        half = sps // 2\n        #\
+      \ Roll code to align with current code phase estimate\n        c = np.roll(self._code[:self.N],\
+      \ tau_samp)\n        c_E = np.roll(self._code[:self.N], tau_samp + half)\n\
+      \        c_L = np.roll(self._code[:self.N], tau_samp - half)\n        # Correlate\
+      \ (1 ms coherent integration)\n        R_P = np.dot(epoch, c)\n        R_E\
+      \ = np.dot(epoch, c_E)\n        R_L = np.dot(epoch, c_L)\n        # EML discriminator\n\
+      \        e2, l2 = abs(R_E)**2, abs(R_L)**2\n        eps = (e2 - l2) / (e2\
+      \ + l2 + 1e-10)\n        self.tau -= self.K * eps\n        out0, out1 = output_items[0],\
+      \ output_items[1]\n        out0[0] = np.complex64(R_P)\n        out1[0] = np.float32(self.tau\
+      \ % 1023.0)\n        return 1\n"
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    fs: samp_rate
+    chip_rate: chip_rate
+    sv_prn: sv_prn
+  states:
+    coordinate: [1460, 288]
+    rotation: 0
+    state: enabled
+
+# ═══════════════════════════════════════════════════════════════
+#  STEP 10 — NAVIGATION BIT DETECTOR  (50 bps BPSK)
+# ═══════════════════════════════════════════════════════════════
+
+- name: epy_nav_bit_decoder
+  id: epy_block
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: "STEP 10 \u2014 NAVIGATION BIT DETECTOR (50 bps)\n\
+      Integrates prompt correlator output over 20 ms (20 epochs) to\n\
+      detect each 20 ms navigation bit.\n\
+      Math:\n\
+        For each 20-epoch window:\n\
+          B_k = sign(\u03A3[i=0..19] Re[R_P(k\xB720 + i)])  [coherent bit integration]\n\
+        Carrier phase ambiguity \u2014 tracked by Costas loop (Step 8)\n\
+          means sign is correct only after lock.\n\
+        Bit sync detection: cross-correlation of 20-epoch accumulations\n\
+          peaks at the correct epoch boundary.\n\
+      Output: integer bit stream {+1, \u22121} at 50 bits/second"
+    _io_cache: '(''Nav Bit Detector (50 bps)'', ''blk'', [], [(''0'', ''complex'',
+      1)], [(''0'', ''float'', 1)], ''Integrates prompt correlator over 20 ms to
+      detect 50 bps navigation bits.'', {})'
+    _source_code: "import numpy as np\nfrom gnuradio import gr\n\n\nclass blk(gr.sync_block):\n\
+      \    \"\"\"GPS Navigation Bit Detector\n\n    Each GPS navigation data bit lasts\
+      \ 20 ms = 20 C/A code epochs.\n    This block accumulates prompt correlator\
+      \ outputs (1 per ms from the DLL)\n    over 20 samples and decides the bit\
+      \ sign.\n\n    Math:\n        I_acc(k) = sum_{i=0}^{19} Re[ R_P(20*k + i)\
+      \ ]   coherent integration\n        bit(k)   = sign( I_acc(k) )             \
+      \          hard decision\n\n    An initial bit-sync search tries all 20 possible\
+      \ epoch boundaries\n    and selects the one that maximises |I_acc| variance.\n\
+      \    \"\"\"\n\n    BITS_PER_WORD = 20   # 20 ms per navigation bit\n\n    def\
+      \ __init__(self):\n        gr.sync_block.__init__(\n            self,\n    \
+      \        name='Nav Bit Detector (50 bps)',\n            in_sig=[np.complex64],\n\
+      \            out_sig=[np.float32]\n        )\n        self.set_output_multiple(1)\n\
+      \        self._buf = []\n        self._boundary = None   # epoch offset of\
+      \ bit boundary\n        self._sync_buf = []     # for bit-sync search\n\n \
+      \   def _find_boundary(self, buf):\n        \"\"\"Try all 20 epoch offsets;\
+      \ pick the one with max |I_acc| variance.\"\"\"\n        scores = np.zeros(self.BITS_PER_WORD)\n\
+      \        data = np.array([x.real for x in buf[:400]], dtype=np.float32)  #\
+      \ 20 bits worth\n        for offset in range(self.BITS_PER_WORD):\n       \
+      \     accs = []\n            for b in range(20):\n                start = offset\
+      \ + b * self.BITS_PER_WORD\n                if start + self.BITS_PER_WORD <=\
+      \ len(data):\n                    accs.append(data[start:start+self.BITS_PER_WORD].sum())\n\
+      \            scores[offset] = np.var(accs) if len(accs) > 1 else 0.0\n    \
+      \    return int(np.argmax(scores))\n\n    def work(self, input_items, output_items):\n\
+      \        self._buf.extend(input_items[0].tolist())\n        out = output_items[0]\n\
+      \        n_out = 0\n        # Bit-sync: collect 400 epochs then find boundary\n\
+      \        if self._boundary is None:\n            if len(self._sync_buf) < 400:\n\
+      \                self._sync_buf.extend(input_items[0].tolist())\n          \
+      \  else:\n                self._boundary = self._find_boundary(self._sync_buf)\n\
+      \                self._buf = self._sync_buf[self._boundary:]\n        else:\n\
+      \            while len(self._buf) >= self.BITS_PER_WORD:\n                chunk\
+      \ = self._buf[:self.BITS_PER_WORD]\n                self._buf = self._buf[self.BITS_PER_WORD:]\n\
+      \                acc = sum(x.real for x in chunk)\n                if n_out\
+      \ < len(out):\n                    out[n_out] = np.float32(1.0 if acc >= 0\
+      \ else -1.0)\n                    n_out += 1\n        return max(n_out, 0)\n"
+    maxoutbuf: '0'
+    minoutbuf: '0'
+  states:
+    coordinate: [1660, 288]
+    rotation: 0
+    state: enabled
+
+# ═══════════════════════════════════════════════════════════════
+#  STEP 11 — NAVIGATION MESSAGE PARSER  (Subframes & Ephemeris)
+# ═══════════════════════════════════════════════════════════════
+
+- name: epy_nav_message_parser
+  id: epy_block
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: "STEP 11 \u2014 NAVIGATION MESSAGE PARSER\n\
+      Decodes the 1500-bit GPS navigation message (30 s period).\n\
+      Structure:\n\
+        1 frame    = 5 subframes \xD7 300 bits  (30 s)\n\
+        1 subframe = 10 words    \xD7 30 bits   (6 s)\n\
+        1 word     = 24 data bits + 6 parity (BCH)\n\
+      Parity check: d_26..d_30 = BCH(d_1..d_24, D_29*, D_30*)\n\
+      Subframe 1: Week number, clock corrections (a_f0, a_f1, a_f2)\n\
+      Subframe 2: Ephemeris  (M_0, e, sqrt_A, t_oe, C_uc, C_us)\n\
+      Subframe 3: Ephemeris  (i_0, OMEGA_0, omega, IDOT, OMEGADOT)\n\
+      Subframe 4/5: Almanac & UTC corrections\n\
+      Output: JSON-encoded ephemeris dict per satellite"
+    _io_cache: '(''Nav Message Parser'', ''blk'', [], [(''0'', ''float'', 1)], [(''0'',
+      ''message'', 0)], ''Decodes GPS navigation subframes from 50 bps bit stream.'',
+      {})'
+    _source_code: "import numpy as np\nfrom gnuradio import gr\n\n\nGPS_PARITY_MATRIX\
+      \ = [\n    0b111011010000000000000000,\n    0b011101101000000000000000,\n  \
+      \  0b101110110100000000000000,\n    0b010111011010000000000000,\n    0b101011101101000000000000,\n\
+      \    0b110101110110100000000000,\n]\n\n\ndef parity_check(word_30):\n    \"\
+      \"\"GPS 6-bit BCH parity check on 30-bit word.\"\"\"\n    d = word_30 >> 6\
+      \  # 24 data bits\n    prev = (word_30 >> 30) & 0x3  # D29*, D30* from previous\
+      \ word\n    ok = True\n    for i, mask in enumerate(GPS_PARITY_MATRIX):\n \
+      \       p_calc = bin(d & mask).count('1') & 1\n        p_recv = (word_30 >>\
+      \ (5 - i)) & 1\n        if p_calc != p_recv:\n            ok = False\n    return\
+      \ ok\n\n\nclass blk(gr.sync_block):\n    \"\"\"GPS Navigation Message Parser\n\
+      \n    Accumulates the 50 bps bit stream, synchronises to the preamble\n   \
+      \ (0x8B = 10001011), and decodes navigation subframes.\n\n    Subframe structure\
+      \ (each 300 bits @ 50 bps = 6 s):\n        Word 1 : TLM  — preamble 10001011,\
+      \ TLM message, reserved, parity\n        Word 2 : HOW  — TOW count, subframe\
+      \ ID (bits 20-22), parity\n        Words 3-10: data payload (subframe-dependent)\n\
+      \n    Outputs message PDU with ephemeris dict (JSON bytes).\n    \"\"\"\n\n\
+      \    PREAMBLE = 0b10001011   # 0x8B\n    SUBFRAME_BITS = 300\n\n    def __init__(self):\n\
+      \        gr.sync_block.__init__(\n            self,\n            name='Nav Message\
+      \ Parser',\n            in_sig=[np.float32],\n            out_sig=[]\n     \
+      \   )\n        self.message_port_register_out(gr.pmt.intern('ephemeris'))\n\
+      \        self._bits = []\n        self._ephemeris = {}\n\n    def _bits_to_int(self,\
+      \ bits, start, length):\n        val = 0\n        for i in range(length):\n\
+      \            val = (val << 1) | (1 if bits[start + i] > 0 else 0)\n       \
+      \ return val\n\n    def _twos_complement(self, val, bits):\n        if val &\
+      \ (1 << (bits - 1)):\n            val -= (1 << bits)\n        return val\n\n\
+      \    def _decode_subframe(self, bits):\n        \"\"\"Extract key fields from\
+      \ 300-bit subframe.\"\"\"\n        sf_id = self._bits_to_int(bits, 49, 3) \
+      \ # Word 2 bits 20-22\n        import json\n        if sf_id == 1:\n       \
+      \     week  = self._bits_to_int(bits, 60, 10)\n            a_f2  = self._twos_complement(self._bits_to_int(bits,\
+      \ 180, 8), 8)  * 2**-55\n            a_f1  = self._twos_complement(self._bits_to_int(bits,\
+      \ 188, 16), 16) * 2**-43\n            a_f0  = self._twos_complement(self._bits_to_int(bits,\
+      \ 204, 22), 22) * 2**-31\n            self._ephemeris.update({'week': week,\
+      \ 'af0': a_f0, 'af1': a_f1, 'af2': a_f2})\n        elif sf_id == 2:\n    \
+      \        sqrtA = self._bits_to_int(bits, 150, 32) * 2**-19\n            e \
+      \    = self._bits_to_int(bits, 120, 32) * 2**-33\n            M0    = self._twos_complement(self._bits_to_int(bits,\
+      \ 90, 32), 32) * 2**-31 * 3.141592653589793\n            self._ephemeris.update({'sqrtA':\
+      \ sqrtA, 'e': e, 'M0': M0})\n        elif sf_id == 3:\n            i0  = self._twos_complement(self._bits_to_int(bits,\
+      \ 150, 32), 32) * 2**-31 * 3.141592653589793\n            om0 = self._twos_complement(self._bits_to_int(bits,\
+      \ 90, 32), 32)  * 2**-31 * 3.141592653589793\n            self._ephemeris.update({'i0':\
+      \ i0, 'Omega0': om0})\n        if len(self._ephemeris) >= 8:\n            pdu\
+      \ = gr.pmt.cons(gr.pmt.intern('ephemeris'),\n                             gr.pmt.init_u8vector(len(json.dumps(self._ephemeris).encode()),\n\
+      \                             list(json.dumps(self._ephemeris).encode())))\n\
+      \            self.message_port_pub(gr.pmt.intern('ephemeris'), pdu)\n\n    def\
+      \ work(self, input_items, output_items):\n        self._bits.extend(input_items[0].tolist())\n\
+      \        # Search for preamble (0x8B) with 300-bit alignment\n        while\
+      \ len(self._bits) >= self.SUBFRAME_BITS:\n            # Check for preamble\
+      \ in first 8 bits\n            first8 = self._bits_to_int(self._bits, 0, 8)\n\
+      \            if first8 == self.PREAMBLE or first8 == (~self.PREAMBLE & 0xFF):\n\
+      \                self._decode_subframe(self._bits)\n                self._bits\
+      \ = self._bits[self.SUBFRAME_BITS:]\n            else:\n                self._bits.pop(0)\n\
+      \        return len(input_items[0])\n"
+    maxoutbuf: '0'
+    minoutbuf: '0'
+  states:
+    coordinate: [1860, 288]
+    rotation: 0
+    state: enabled
+
+# ═══════════════════════════════════════════════════════════════
+#  STEP 12 — PSEUDORANGE CALCULATOR
+# ═══════════════════════════════════════════════════════════════
+
+- name: epy_pseudorange_calc
+  id: epy_block
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: "STEP 12 \u2014 PSEUDORANGE CALCULATOR\n\
+      Converts code phase and time-of-week into a range measurement.\n\
+      Math:\n\
+        Transmission time: t_tx = TOW + code_phase / chip_rate\n\
+        Reception  time:   t_rx = local clock time\n\
+        Raw pseudorange:   \u03C1 = c \xD7 (t_rx \u2212 t_tx)\n\
+          where c = 299,792,458 m/s (speed of light)\n\
+        Satellite position at t_tx (Kepler orbit propagation):\n\
+          Mean anomaly: M = M_0 + n\xB7(t \u2212 t_oe)\n\
+            n = sqrt(\u03BC / a\xB3)   [\u03BC = 3.986004418e14 m\xB3/s\xB2]\n\
+          Eccentric anomaly: solve Kepler eq. M = E \u2212 e\xB7sin(E)\n\
+          True anomaly: \u03BD = atan2(sqrt(1\u2212e\xB2)\xB7sin(E), cos(E)\u2212e)\n\
+          Satellite ECEF XYZ from orbital elements.\n\
+        Geometric range: \u03C1_geo = |x_sv \u2212 x_rx|\n\
+        Residual: \u03B4\u03C1 = \u03C1 \u2212 \u03C1_geo  [for least squares]"
+    _io_cache: '(''Pseudorange Calculator'', ''blk'', [(''sv_prn'', ''1'')], [(''0'',
+      ''message'', 0), (''1'', ''float'', 1)], [(''0'', ''message'', 0)], ''Computes
+      pseudorange from ephemeris and DLL code phase.'', {})'
+    _source_code: "import numpy as np\nfrom gnuradio import gr\nimport json\n\n\n\
+      MU_EARTH  = 3.986004418e14   # m^3/s^2  (GM)\nOMEGA_E   = 7.2921151467e-5\
+      \  # rad/s   (Earth rotation rate)\nC_LIGHT   = 299792458.0       # m/s\nPI\
+      \        = 3.141592653589793\n\n\ndef kepler_solve(M, e, tol=1e-12):\n    \"\
+      \"\"Solve Kepler's equation M = E - e*sin(E) by Newton-Raphson.\"\"\"\n   \
+      \ E = M\n    for _ in range(10):\n        dE = (M - E + e * np.sin(E)) / (1.0\
+      \ - e * np.cos(E))\n        E += dE\n        if abs(dE) < tol:\n          \
+      \  break\n    return E\n\n\ndef sv_position_ecef(eph, t):\n    \"\"\"\n   \
+      \ Propagate satellite ECEF position from Keplerian ephemeris.\n    eph: dict\
+      \ with keys sqrtA, e, M0, i0, Omega0, (af0, af1, week, ...)\n    t  : time\
+      \ of applicability (GPS seconds of week)\n    \"\"\"\n    A  = eph['sqrtA']**2\
+      \              # semi-major axis (m)\n    n0 = np.sqrt(MU_EARTH / A**3)    \
+      \   # mean motion (rad/s)\n    tk = t - eph.get('toe', 0.0)        # time from\
+      \ ephemeris reference\n    n  = n0                             # (simplified:\
+      \ no delta-n correction)\n    M  = eph['M0'] + n * tk             # mean anomaly\n\
+      \    E  = kepler_solve(M, eph['e'])      # eccentric anomaly\n    sinv = np.sqrt(1.0\
+      \ - eph['e']**2) * np.sin(E) / (1.0 - eph['e'] * np.cos(E))\n    cosv = (np.cos(E)\
+      \ - eph['e']) / (1.0 - eph['e'] * np.cos(E))\n    nu   = np.arctan2(sinv,\
+      \ cosv)          # true anomaly\n    r    = A * (1.0 - eph['e'] * np.cos(E))\
+      \  # orbital radius\n    # Orbital plane x, y\n    xp   = r * np.cos(nu)\n\
+      \    yp   = r * np.sin(nu)\n    # Inclination and RAAN (right ascension of\
+      \ ascending node)\n    i    = eph.get('i0', 0.0)\n    Om   = eph.get('Omega0',\
+      \ 0.0) - OMEGA_E * t   # correct for Earth rotation\n    # Rotate to ECEF\n\
+      \    X = xp * np.cos(Om) - yp * np.cos(i) * np.sin(Om)\n    Y = xp * np.sin(Om)\
+      \ + yp * np.cos(i) * np.cos(Om)\n    Z = yp * np.sin(i)\n    return np.array([X,\
+      \ Y, Z])\n\n\nclass blk(gr.sync_block):\n    \"\"\"Pseudorange Calculator\n\
+      \n    Receives:\n      - Ephemeris message from Nav Message Parser (Step 11)\n\
+      \      - Code phase float stream from DLL (Step 9)\n\n    Computes:\n      \
+      \  rho = c * (t_rx - t_tx)         raw pseudorange in metres\n        sv_xyz\
+      \ = Keplerian orbit propagation to get satellite ECEF position\n\n    Outputs\
+      \ message: {prn, rho, sv_xyz, t_rx}\n    \"\"\"\n\n    def __init__(self, sv_prn=1):\n\
+      \        gr.sync_block.__init__(\n            self,\n            name='Pseudorange\
+      \ Calculator',\n            in_sig=[np.float32],\n            out_sig=[]\n \
+      \       )\n        self.sv_prn = sv_prn\n        self.message_port_register_in(gr.pmt.intern('ephemeris'))\n\
+      \        self.message_port_register_out(gr.pmt.intern('pseudorange'))\n    \
+      \    self.set_msg_handler(gr.pmt.intern('ephemeris'), self._handle_eph)\n  \
+      \      self._eph = None\n        self._tow = 0.0\n\n    def _handle_eph(self,\
+      \ msg):\n        data = bytes(gr.pmt.u8vector_elements(gr.pmt.cdr(msg)))\n \
+      \       self._eph = json.loads(data.decode())\n\n    def work(self, input_items,\
+      \ output_items):\n        code_phases = input_items[0]\n        if self._eph\
+      \ is None:\n            return len(code_phases)\n        for cp in code_phases:\n\
+      \            # Pseudorange: c * code_phase_in_seconds\n            chip_period\
+      \ = 1.0 / 1023000.0   # seconds per chip\n            t_prop = float(cp) *\
+      \ chip_period\n            rho = C_LIGHT * t_prop\n            # Satellite ECEF\
+      \ position\n            sv_xyz = sv_position_ecef(self._eph, self._tow + t_prop).tolist()\n\
+      \            self._tow += chip_period\n            result = {'prn': self.sv_prn,\
+      \ 'rho': rho, 'sv_xyz': sv_xyz}\n            pdu = gr.pmt.cons(\n         \
+      \       gr.pmt.intern('pseudorange'),\n                gr.pmt.init_u8vector(len(json.dumps(result).encode()),\n\
+      \                list(json.dumps(result).encode())))\n            self.message_port_pub(gr.pmt.intern('pseudorange'),\
+      \ pdu)\n        return len(code_phases)\n"
+    maxoutbuf: '0'
+    minoutbuf: '0'
+    sv_prn: sv_prn
+  states:
+    coordinate: [2060, 288]
+    rotation: 0
+    state: enabled
+
+# ═══════════════════════════════════════════════════════════════
+#  STEP 13 — POSITION SOLVER  (WGS-84 Least Squares)
+# ═══════════════════════════════════════════════════════════════
+
+- name: epy_position_solver
+  id: epy_block
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: "STEP 13 \u2014 POSITION SOLVER (WGS-84 Least Squares)\n\
+      Solves for receiver position (X,Y,Z) and clock bias (b) from\n\
+      \u22654 satellite pseudoranges simultaneously.\n\
+      Math:\n\
+        State vector: x = [X_r, Y_r, Z_r, b]^T\n\
+        Predicted range: \u03C1\u0302_i = |sv_xyz_i \u2212 [X_r,Y_r,Z_r]| + b\n\
+        Linearise around estimate x_0:\n\
+          \u0394\u03C1_i = \u03C1_i \u2212 \u03C1\u0302_i    [range residual]\n\
+        Line-of-sight unit vector:\n\
+          a_i = (x_0 \u2212 sv_xyz_i) / |\u03C1\u0302_i|\n\
+        Geometry matrix H (n\xD74): [a_ix, a_iy, a_iz, 1]  (per satellite)\n\
+        Least squares update:\n\
+          \u0394x = (H^T H)^{-1} H^T \u0394\u03C1    [normal equations]\n\
+        Iterate until |\u0394x| < 1 m\n\
+        Convert ECEF (X,Y,Z) \u2192 WGS-84 (lat, lon, alt):\n\
+          lat = atan2(Z + e\xB2b sin\u03C6, p)  [iterative Bowring]\n\
+          lon = atan2(Y, X)\n\
+          alt = p/cos(lat) \u2212 N  [N = WGS-84 prime vertical radius]"
+    _io_cache: '(''Position Solver (WGS-84 LS)'', ''blk'', [], [(''0'', ''message'',
+      0)], [(''0'', ''message'', 0)], ''WGS-84 iterative least-squares position fix
+      from 4+ pseudoranges.'', {})'
+    _source_code: "import numpy as np\nfrom gnuradio import gr\nimport json\n\n\n\
+      C_LIGHT = 299792458.0\nPI      = 3.141592653589793\n# WGS-84 ellipsoid constants\n\
+      WGS84_A = 6378137.0          # semi-major axis (m)\nWGS84_B = 6356752.3142\
+      \      # semi-minor axis (m)\nWGS84_E2 = 1.0 - (WGS84_B/WGS84_A)**2  # first\
+      \ eccentricity squared\n\n\ndef ecef_to_geodetic(X, Y, Z):\n    \"\"\"\n  \
+      \  Convert ECEF (X, Y, Z) metres to WGS-84 (lat deg, lon deg, alt m)\n    using\
+      \ iterative Bowring method.\n    \"\"\"\n    p   = np.sqrt(X**2 + Y**2)\n \
+      \   lon = np.arctan2(Y, X)\n    lat = np.arctan2(Z, p * (1.0 - WGS84_E2))\
+      \  # initial estimate\n    for _ in range(10):\n        sin_lat = np.sin(lat)\n\
+      \        N   = WGS84_A / np.sqrt(1.0 - WGS84_E2 * sin_lat**2)\n        lat_new\
+      \ = np.arctan2(Z + WGS84_E2 * N * sin_lat, p)\n        if abs(lat_new - lat)\
+      \ < 1e-12:\n            lat = lat_new\n            break\n        lat = lat_new\n\
+      \    sin_lat = np.sin(lat)\n    N   = WGS84_A / np.sqrt(1.0 - WGS84_E2 * sin_lat**2)\n\
+      \    alt = p / np.cos(lat) - N if abs(np.cos(lat)) > 1e-10 else abs(Z) / np.sin(lat)\
+      \ - N * (1.0 - WGS84_E2)\n    return np.degrees(lat), np.degrees(lon), alt\n\
+      \n\ndef solve_ls(pseudoranges):\n    \"\"\"\n    Iterative least-squares position\
+      \ fix.\n    pseudoranges: list of {'prn', 'rho', 'sv_xyz'}\n    Returns (lat,\
+      \ lon, alt) in degrees / metres, or None if underdetermined.\n    \"\"\"\n \
+      \   if len(pseudoranges) < 4:\n        return None\n    # Initial estimate:\
+      \ Earth centre, zero clock bias\n    x = np.array([0.0, 0.0, 0.0, 0.0])  #\
+      \ [X, Y, Z, b]\n    for iteration in range(10):\n        H_rows, delta_rho\
+      \ = [], []\n        for pr in pseudoranges:\n            sv  = np.array(pr['sv_xyz'])\n\
+      \            diff = x[:3] - sv\n            rho_hat = np.linalg.norm(diff)\
+      \ + x[3]\n            if rho_hat < 1.0:\n                rho_hat = 1.0  # guard\n\
+      \            los = diff / (rho_hat - x[3] + 1e-10)   # unit vector receiver\
+      \ -> SV\n            H_rows.append([los[0], los[1], los[2], 1.0])\n        \
+      \    delta_rho.append(pr['rho'] - rho_hat)\n        H  = np.array(H_rows)\n\
+      \        dr = np.array(delta_rho)\n        # Normal equations: dx = (H^T H)^-1\
+      \ H^T dr\n        try:\n            dx = np.linalg.solve(H.T @ H, H.T @ dr)\n\
+      \        except np.linalg.LinAlgError:\n            return None\n        x\
+      \ += dx\n        if np.linalg.norm(dx[:3]) < 0.01:   # 1 cm convergence\n\
+      \            break\n    lat, lon, alt = ecef_to_geodetic(x[0], x[1], x[2])\n\
+      \    return {'lat': lat, 'lon': lon, 'alt_m': alt, 'clock_bias_m': float(x[3])}\n\
+      \n\nclass blk(gr.sync_block):\n    \"\"\"WGS-84 Iterative Least-Squares Position\
+      \ Solver\n\n    Accumulates pseudorange measurements from multiple satellites\n\
+      \    (Step 12) and runs the iterative LS fix when >=4 are available.\n\n  \
+      \  Algorithm:\n        1. Build geometry matrix H (n x 4)\n        2. Compute\
+      \ predicted ranges rho_hat from current estimate\n        3. Form residual vector\
+      \ dr = rho_measured - rho_hat\n        4. Update: dx = (H^T H)^-1 H^T dr\
+      \  (normal equations)\n        5. Repeat until ||dx|| < 0.01 m\n        6.\
+      \ Convert ECEF -> WGS-84 geodetic (lat/lon/alt)\n    \"\"\"\n\n    def __init__(self):\n\
+      \        gr.sync_block.__init__(\n            self,\n            name='Position\
+      \ Solver (WGS-84 LS)',\n            in_sig=[],\n            out_sig=[]\n   \
+      \     )\n        self.message_port_register_in(gr.pmt.intern('pseudorange'))\n\
+      \        self.message_port_register_out(gr.pmt.intern('position'))\n       \
+      \ self.set_msg_handler(gr.pmt.intern('pseudorange'), self._handle_pr)\n    \
+      \    self._measurements = {}   # {prn: last pseudorange dict}\n\n    def _handle_pr(self,\
+      \ msg):\n        data = bytes(gr.pmt.u8vector_elements(gr.pmt.cdr(msg)))\n \
+      \       pr = json.loads(data.decode())\n        self._measurements[pr['prn']]\
+      \ = pr\n        if len(self._measurements) >= 4:\n            fix = solve_ls(list(self._measurements.values()))\n\
+      \            if fix:\n                out_bytes = json.dumps(fix).encode()\n\
+      \                pdu = gr.pmt.cons(\n                    gr.pmt.intern('position'),\n\
+      \                    gr.pmt.init_u8vector(len(out_bytes), list(out_bytes)))\n\
+      \                self.message_port_pub(gr.pmt.intern('position'), pdu)\n\n \
+      \   def work(self, input_items, output_items):\n        return 0\n"
+    maxoutbuf: '0'
+    minoutbuf: '0'
+  states:
+    coordinate: [2260, 288]
+    rotation: 0
+    state: enabled
+
+# ═══════════════════════════════════════════════════════════════
+#  STEP 14 — NMEA ENCODER  (Output $GPGGA sentences)
+# ═══════════════════════════════════════════════════════════════
+
+- name: epy_nmea_encoder
+  id: epy_block
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: "STEP 14 \u2014 NMEA 0183 ENCODER\n\
+      Converts WGS-84 position fix to NMEA $GPGGA sentence.\n\
+      Format:\n\
+        $GPGGA,HHMMSS.ss,DDMM.mmm,N,DDDMM.mmm,E,Q,NN,DOP,ALT,M,,,,*CS<CR><LF>\n\
+      Fields:\n\
+        HHMMSS.ss — UTC time (from GPS week + TOW + leap seconds)\n\
+        DDMM.mmm  — Latitude in degrees + decimal minutes (NMEA units)\n\
+        DDDMM.mmm — Longitude\n\
+        Q         — Fix quality: 1=GPS, 2=DGPS\n\
+        NN        — Number of satellites used\n\
+        DOP       — Horizontal dilution of precision (HDOP)\n\
+        ALT,M     — MSL altitude in metres\n\
+        *CS       — XOR checksum of all chars between $ and *\n\
+      Also writes $GPRMC sentence for compatibility."
+    _io_cache: '(''NMEA 0183 Encoder'', ''blk'', [], [(''0'', ''message'', 0)],
+      [(''0'', ''message'', 0)], ''Encodes WGS-84 position as NMEA $GPGGA/$GPRMC.'',
+      {})'
+    _source_code: "import numpy as np\nfrom gnuradio import gr\nimport json\nimport\
+      \ time\n\n\ndef nmea_checksum(sentence):\n    \"\"\"XOR all characters between\
+      \ '$' and '*'.\"\"\"\n    cs = 0\n    for ch in sentence:\n        cs ^= ord(ch)\n\
+      \    return '{:02X}'.format(cs)\n\n\ndef deg_to_nmea(deg, is_lat):\n    \"\"\"Convert\
+      \ decimal degrees to NMEA DDDMM.mmmm format + hemisphere.\"\"\"\n    hemi\
+      \ = ('N' if deg >= 0 else 'S') if is_lat else ('E' if deg >= 0 else 'W')\n\
+      \    deg = abs(deg)\n    d = int(deg)\n    m = (deg - d) * 60.0\n    fmt =\
+      \ '{:02d}{:09.6f}' if is_lat else '{:03d}{:09.6f}'\n    return fmt.format(d,\
+      \ m), hemi\n\n\nclass blk(gr.sync_block):\n    \"\"\"NMEA 0183 Sentence Encoder\n\
+      \n    Receives position fix messages from the Position Solver (Step 13)\n  \
+      \  and outputs standard NMEA 0183 $GPGGA and $GPRMC sentences.\n\n    $GPGGA\
+      \ — Global Positioning System Fix Data\n    $GPRMC — Recommended Minimum Specific\
+      \ GPS Data\n\n    Both sentences include XOR checksum for data integrity.\n\
+      \    Output is PDU message containing ASCII NMEA bytes.\n    \"\"\"\n\n    def\
+      \ __init__(self):\n        gr.sync_block.__init__(\n            self,\n    \
+      \        name='NMEA 0183 Encoder',\n            in_sig=[],\n            out_sig=[]\n\
+      \        )\n        self.message_port_register_in(gr.pmt.intern('position'))\n\
+      \        self.message_port_register_out(gr.pmt.intern('nmea'))\n        self.set_msg_handler(gr.pmt.intern('position'),\
+      \ self._handle_pos)\n        self._fix_count = 0\n\n    def _handle_pos(self,\
+      \ msg):\n        data = bytes(gr.pmt.u8vector_elements(gr.pmt.cdr(msg)))\n \
+      \       pos  = json.loads(data.decode())\n        lat, lon, alt = pos['lat'],\
+      \ pos['lon'], pos['alt_m']\n        self._fix_count += 1\n\n        # UTC time\
+      \ from system clock (approximate — proper impl uses GPS TOW)\n        t   =\
+      \ time.gmtime()\n        utc = '{:02d}{:02d}{:02d}.00'.format(t.tm_hour, t.tm_min,\
+      \ t.tm_sec)\n        date = '{:02d}{:02d}{:02d}'.format(t.tm_mday, t.tm_mon,\
+      \ t.tm_year % 100)\n\n        lat_s, lat_h = deg_to_nmea(lat, is_lat=True)\n\
+      \        lon_s, lon_h = deg_to_nmea(lon, is_lat=False)\n\n        # $GPGGA\n\
+      \        gga_body = 'GPGGA,{},{},{},{},{},1,04,1.0,{:.1f},M,0.0,M,,'.format(\n\
+      \            utc, lat_s, lat_h, lon_s, lon_h, alt)\n        gga = '${}*{}\\r\\\
+      n'.format(gga_body, nmea_checksum(gga_body))\n\n        # $GPRMC\n        rmc_body\
+      \ = 'GPRMC,{},A,{},{},{},{},{:.1f},{:.1f},{},,,A'.format(\n            utc,\
+      \ lat_s, lat_h, lon_s, lon_h,\n            0.0,   # speed over ground (knots)\
+      \ — placeholder\n            0.0,   # track angle — placeholder\n          \
+      \  date)\n        rmc = '${}*{}\\r\\n'.format(rmc_body, nmea_checksum(rmc_body))\n\
+      \n        combined = (gga + rmc).encode('ascii')\n        pdu = gr.pmt.cons(\n\
+      \            gr.pmt.intern('nmea'),\n            gr.pmt.init_u8vector(len(combined),\
+      \ list(combined)))\n        self.message_port_pub(gr.pmt.intern('nmea'), pdu)\n\
+      \n    def work(self, input_items, output_items):\n        return 0\n"
+    maxoutbuf: '0'
+    minoutbuf: '0'
+  states:
+    coordinate: [2460, 288]
+    rotation: 0
+    state: enabled
+
+# ═══════════════════════════════════════════════════════════════
+#  OUTPUT — File Sink (NMEA log) + GUI Display
+# ═══════════════════════════════════════════════════════════════
+
+- name: blocks_null_sink_acq
+  id: blocks_null_sink
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: 'Acquisition Engine output sink (float: code_phase, doppler, CN0 triplets)'
+    bus_structure_sink: '[[0,],]'
+    num_inputs: '1'
+    type: float
+    vlen: '1'
+  states:
+    coordinate: [800, 488]
+    rotation: 0
+    state: enabled
+
+- name: blocks_message_debug_0
+  id: blocks_message_debug
+  parameters:
+    affinity: ''
+    alias: ''
+    comment: "OUTPUT \u2014 Print NMEA sentences to console\n\
+      Shows decoded $GPGGA and $GPRMC strings as they are produced.\n\
+      Connect a serial forwarder or pipe to feed nav software."
+    en_uvec: 'True'
+  states:
+    coordinate: [2660, 288]
+    rotation: 0
+    state: enabled
+
+# ─── QT GUI Tab container ─────────────────────────────────────────────────────
+
+- name: tabs
+  id: qtgui_tab_widget
+  parameters:
+    alias: ''
+    comment: ''
+    gui_hint: ''
+    label0: RF Chain
+    label1: Correlators & Tracking
+    label2: Navigation & Fix
+    num_tabs: '3'
+  states:
+    coordinate: [8, 160]
+    rotation: 0
+    state: enabled
+
+# ─── Constellation display (PLL output) ──────────────────────────────────────
+
+- name: qtgui_const_sink_pll
+  id: qtgui_const_sink_x
+  parameters:
+    affinity: ''
+    alias: ''
+    alpha1: '0.5'
+    comment: "VISUALISATION \u2014 IQ constellation after PLL\n\
+      BPSK nav data: should show two clusters at \xB1Re axis\n\
+      Wide spread = poor lock; tight clusters = good tracking"
+    gui_hint: 'tabs@1:0,2,1,1'
+    label1: PLL Output
+    legend: 'True'
+    name: '"STEP 8: Costas PLL Output (should be BPSK)"'
+    nconnections: '1'
+    size: '1024'
+    style1: '0'
+    tr_chan: '0'
+    tr_level: '0.0'
+    tr_mode: qtgui.TRIG_MODE_FREE
+    tr_tag: '""'
+    type: complex
+    update_time: '0.10'
+    width1: '1'
+    xmax: '2'
+    xmin: '-2'
+    ymax: '2'
+    ymin: '-2'
+  states:
+    coordinate: [1260, 488]
+    rotation: 0
+    state: enabled
+
+# ═══════════════════════════════════════════════════════════════
+#  CONNECTIONS
+#
+#  Signal flow:
+#   RTL-SDR → LPF → AGC ─────────────────────────────────┐
+#                    │                                    │
+#                    └→ RF viz                           │
+#                                                        │
+#   AGC → Multiply(correlation) ← PRN Gen              │
+#         │                                             │
+#   AGC → Multiply (port 0)                            │
+#   PRN → Multiply (port 1)                            │
+#         │                                             │
+#         → Integrate&Dump → Acquisition              │
+#                │                                    │
+#                → Costas PLL → DLL → Nav Bit → Nav Parser
+#                                  │
+#                                  → Pseudorange → Position → NMEA
+# ═══════════════════════════════════════════════════════════════
+
+connections:
+# ── Step 1 → Step 2 : HackRF → LPF ───────────────────────────
+- [rtlsdr_source_0, '0', low_pass_filter_0, '0']
+- [rtlsdr_source_0, '0', qtgui_freq_sink_rf, '0']
+
+# ── Step 2 → Step 3 : LPF → AGC ──────────────────────────────
+- [low_pass_filter_0, '0', analog_agc2_cc_0, '0']
+- [low_pass_filter_0, '0', qtgui_freq_sink_filtered, '0']
+
+# ── Step 3 : AGC → visualise + correlator ─────────────────────
+- [analog_agc2_cc_0, '0', qtgui_time_sink_agc, '0']
+- [analog_agc2_cc_0, '0', blocks_multiply_cc_0, '0']
+# AGC also feeds acquisition (raw signal for search)
+- [analog_agc2_cc_0, '0', epy_acquisition, '0']
+- [epy_acquisition, '0', blocks_null_sink_acq, '0']
+
+# ── Step 4 : PRN Gen → correlator + visualise ─────────────────
+- [epy_prn_generator, '0', blocks_multiply_cc_0, '1']
+- [epy_prn_generator, '0', qtgui_time_sink_prn, '0']
+
+# ── Step 5 → Step 6 : Correlator → Integrate & Dump ──────────
+- [blocks_multiply_cc_0, '0', blocks_integrate_cc_0, '0']
+
+# ── Step 6 → Step 8 : I&D → Costas PLL ───────────────────────
+- [blocks_integrate_cc_0, '0', epy_costas_pll, '0']
+
+# ── Step 8 : PLL → visualise + DLL ───────────────────────────
+- [epy_costas_pll, '0', qtgui_const_sink_pll, '0']
+- [epy_costas_pll, '0', epy_dll, '0']
+
+# ── Step 9 : DLL → Nav Bit (prompt correlator port 0) ─────────
+- [epy_dll, '0', epy_nav_bit_decoder, '0']
+# DLL code phase (port 1) → Pseudorange Calculator ────────────
+- [epy_dll, '1', epy_pseudorange_calc, '0']
+
+# ── Step 10 → Step 11 : Nav Bits → Nav Message Parser ─────────
+- [epy_nav_bit_decoder, '0', epy_nav_message_parser, '0']
+
+# ── Message connections ────────────────────────────────────────
+# Nav Parser → Pseudorange Calc (ephemeris)
+- [epy_nav_message_parser, ephemeris, epy_pseudorange_calc, ephemeris]
+# Pseudorange Calc → Position Solver
+- [epy_pseudorange_calc, pseudorange, epy_position_solver, pseudorange]
+# Position Solver → NMEA Encoder
+- [epy_position_solver, position, epy_nmea_encoder, position]
+# NMEA → debug console
+- [epy_nmea_encoder, nmea, blocks_message_debug_0, print]
+
+metadata:
+  file_format: 1
